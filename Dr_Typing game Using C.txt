@@ -1,0 +1,756 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <conio.h>
+#include <ctype.h>
+#include <windows.h>
+
+#define MAX_USERS        100
+#define MAX_TEXT_LENGTH  2000
+#define MAX_LINE_LENGTH  2000
+#define BOX_WIDTH        82       /* total width including the two '|' borders */
+#define INNER_WIDTH      (BOX_WIDTH - 4)   /* usable text width inside "| " ... " |" */
+#define MAX_RECORDS      (MAX_USERS * 10)
+
+/* ── Data Structures ─────────────────────────────────────── */
+typedef struct {
+    char username[50];
+    char password[50];
+} User;
+
+typedef struct {
+    char username[50];
+    int  wpm;
+    int  accuracy;
+    int  mistakes;
+    int  raw;
+    int  charsTyped;
+    float consistency;
+    time_t date;
+} ScoreRecord;
+
+/* ── Globals ─────────────────────────────────────────────── */
+User        users[MAX_USERS];
+int         userCount  = 0;
+ScoreRecord records[MAX_RECORDS];
+int         recordCount = 0;
+char        currentUser[50] = "";
+
+/* ── Prototypes ──────────────────────────────────────────── */
+void loadUsers();
+void saveUsers();
+void loadRecords();
+void saveRecords();
+void createTextFiles();
+int  login();
+void registerUser();
+void mainMenu();
+void typingTest(int duration);
+void showResults(int correctChars, int totalChars, int mistakes,
+                 int duration, int raw, int charsTyped, float consistency);
+void showScoreboard();
+void showPersonalRecords();
+void showAbout();
+void showContact();
+void displayWelcome();
+void clearScreen();
+void myDelay(int milliseconds);
+
+/* ── Box / Display Helpers ───────────────────────────────── */
+
+/* Print a full-width horizontal rule:  +====...====+  or  +----...----+ */
+static void hRule(char corner, char fill) {
+    putchar(corner);
+    for (int i = 0; i < BOX_WIDTH - 2; i++) putchar(fill);
+    putchar(corner);
+    putchar('\n');
+}
+
+/* Print one box row:   | <text padded to INNER_WIDTH> |               */
+static void boxRow(const char *text) {
+    printf("| %-*s |\n", INNER_WIDTH, text);
+}
+
+/* Print one centred box row */
+static void boxRowCentre(const char *text) {
+    int len = (int)strlen(text);
+    int left  = (INNER_WIDTH - len) / 2;
+    int right = INNER_WIDTH - len - left;
+    printf("|%*s%s%*s|\n", left + 1, "", text, right + 1, "");
+}
+
+/* ── displayTextInBox ────────────────────────────────────────
+   Word-wraps 'text' to INNER_WIDTH columns and prints each
+   wrapped line inside a "| ... |" box.
+   Works for texts of any length (15 s short or 150 s long).
+───────────────────────────────────────────────────────────── */
+void displayTextInBox(const char *text) {
+    hRule('+', '-');
+
+    /* Make a local copy so we can tokenise */
+    char buf[MAX_TEXT_LENGTH];
+    strncpy(buf, text, MAX_TEXT_LENGTH - 1);
+    buf[MAX_TEXT_LENGTH - 1] = '\0';
+
+    char line[MAX_TEXT_LENGTH] = "";
+    int  lineLen = 0;
+
+    /* Split on spaces; when a word would exceed INNER_WIDTH, flush the line */
+    char *word = strtok(buf, " ");
+    while (word != NULL) {
+        int wlen = (int)strlen(word);
+
+        if (lineLen == 0) {
+            /* First word on this line */
+            strcat(line, word);
+            lineLen += wlen;
+        } else if (lineLen + 1 + wlen <= INNER_WIDTH) {
+            /* Word fits with one space */
+            strcat(line, " ");
+            strcat(line, word);
+            lineLen += 1 + wlen;
+        } else {
+            /* Flush current line and start a new one */
+            boxRow(line);
+            strcpy(line, word);
+            lineLen = wlen;
+        }
+        word = strtok(NULL, " ");
+    }
+    /* Flush the last line */
+    if (lineLen > 0) boxRow(line);
+
+    hRule('+', '-');
+}
+
+/* ── printHeading ────────────────────────────────────────── */
+void printHeading(const char *text) {
+    printf("\n");
+    hRule(' ', '=');
+    boxRowCentre(text);
+    hRule(' ', '=');
+    printf("\n");
+}
+
+/* ── displayWelcome ──────────────────────────────────────── */
+void displayWelcome() {
+    clearScreen();
+    hRule('+', '=');
+    boxRowCentre("Welcome to DR.Typing");
+    boxRowCentre("An offline typing speed challenge");
+    boxRowCentre("where you can race against friends");
+    boxRowCentre("or go solo to break records!");
+    hRule('+', '=');
+    boxRowCentre("~ Created By: Debadatta Rout ~");
+    hRule('+', '=');
+
+    printf("\n");
+    printf(" _________________________________________________\n");
+    printf("|                                                 |\n");
+    printf("| Choose your option from below:                  |\n");
+    printf("|                                                 |\n");
+    printf("| 1. Existing user -----> Login                   |\n");
+    printf("| 2. New user --------> Register                  |\n");
+    printf("|_________________________________________________|\n\n");
+    printf("<*>==> Enter your choice here : ");
+}
+
+/* ── File I/O ────────────────────────────────────────────── */
+void loadUsers() {
+    FILE *f = fopen("users.txt", "r");
+    if (!f) return;
+    while (userCount < MAX_USERS &&
+           fscanf(f, "%49s %49s",
+                  users[userCount].username,
+                  users[userCount].password) == 2)
+        userCount++;
+    fclose(f);
+}
+
+void saveUsers() {
+    FILE *f = fopen("users.txt", "w");
+    if (!f) { printf(">> Error saving users!\n"); return; }
+    for (int i = 0; i < userCount; i++)
+        fprintf(f, "%s %s\n", users[i].username, users[i].password);
+    fclose(f);
+}
+
+void loadRecords() {
+    FILE *f = fopen("records.txt", "r");
+    if (!f) return;
+    while (recordCount < MAX_RECORDS) {
+        float cons; long dt;
+        if (fscanf(f, "%49s %d %d %d %d %d %f %ld",
+                   records[recordCount].username,
+                   &records[recordCount].wpm,
+                   &records[recordCount].accuracy,
+                   &records[recordCount].mistakes,
+                   &records[recordCount].raw,
+                   &records[recordCount].charsTyped,
+                   &cons, &dt) != 8) break;
+        records[recordCount].consistency = cons;
+        records[recordCount].date        = (time_t)dt;
+        recordCount++;
+    }
+    fclose(f);
+}
+
+void saveRecords() {
+    FILE *f = fopen("records.txt", "w");
+    if (!f) { printf("Error saving records!\n"); return; }
+    for (int i = 0; i < recordCount; i++)
+        fprintf(f, "%s %d %d %d %d %d %.2f %ld\n",
+                records[i].username, records[i].wpm, records[i].accuracy,
+                records[i].mistakes, records[i].raw, records[i].charsTyped,
+                records[i].consistency, (long)records[i].date);
+    fclose(f);
+}
+
+/* ── createTextFiles ─────────────────────────────────────── */
+void createTextFiles() {
+
+    /* Helper: write only if file is truly empty (or new) */
+    #define OPEN_NEW(name) do { \
+        FILE *_f = fopen(name, "r"); \
+        if (_f) { fclose(_f); break; } \
+        _f = fopen(name, "w"); \
+        if (!_f) break;
+
+    /* 15-second texts */
+    {
+        FILE *f = fopen("text_15.txt", "r");
+        if (!f) {
+            f = fopen("text_15.txt", "w");
+            if (f) {
+                fprintf(f, "The quick brown fox jumps over the lazy dog.\n");
+                fprintf(f, "Programming is the art of telling another human what one wants the computer to do.\n");
+                fprintf(f, "To be or not to be, that is the question.\n");
+                fprintf(f, "The early bird catches the worm, but the second mouse gets the cheese.\n");
+                fprintf(f, "All that glitters is not gold, but at least it sparkles.\n");
+                fprintf(f, "Life is like a box of chocolates, you never know what you're gonna get.\n");
+                fprintf(f, "The only way to do great work is to love what you do.\n");
+                fprintf(f, "In the middle of difficulty lies opportunity.\n");
+                fprintf(f, "Success is not final, failure is not fatal: It is the courage to continue that counts.\n");
+                fprintf(f, "The journey of a thousand miles begins with a single step.\n");
+                fclose(f);
+            }
+        } else fclose(f);
+    }
+
+    /* 30-second texts */
+    {
+        FILE *f = fopen("text_30.txt", "r");
+        if (!f) {
+            f = fopen("text_30.txt", "w");
+            if (f) {
+                fprintf(f, "The journey of a thousand miles begins with a single step. Don't count the days, make the days count.\n");
+                fprintf(f, "In the middle of difficulty lies opportunity. The only way to do great work is to love what you do.\n");
+                fprintf(f, "Success is not final, failure is not fatal: It is the courage to continue that counts. Dream big and dare to fail.\n");
+                fprintf(f, "The greatest glory in living lies not in never falling, but in rising every time we fall. Life is what happens when you're busy making other plans.\n");
+                fprintf(f, "Spread love everywhere you go. Let no one ever come to you without leaving happier. Be yourself; everyone else is already taken.\n");
+                fprintf(f, "The future belongs to those who believe in the beauty of their dreams. You must be the change you wish to see in the world.\n");
+                fprintf(f, "In three words I can sum up everything I've learned about life: it goes on. The only impossible journey is the one you never begin.\n");
+                fprintf(f, "Don't walk behind me; I may not lead. Don't walk in front of me; I may not follow. Just walk beside me and be my friend.\n");
+                fprintf(f, "Life is like riding a bicycle. To keep your balance, you must keep moving. The real test is not whether you avoid failure, but whether you learn from it.\n");
+                fprintf(f, "You have brains in your head. You have feet in your shoes. You can steer yourself any direction you choose. You're on your own. And you know what you know.\n");
+                fclose(f);
+            }
+        } else fclose(f);
+    }
+
+    /* 50-second texts */
+    {
+        FILE *f = fopen("text_50.txt", "r");
+        if (!f) {
+            f = fopen("text_50.txt", "w");
+            if (f) {
+                fprintf(f, "The greatest glory in living lies not in never falling, but in rising every time we fall. Life is what happens when you're busy making other plans. Spread love everywhere you go. Let no one ever come to you without leaving happier. The future belongs to those who believe in the beauty of their dreams. You must be the change you wish to see in the world.\n");
+                fprintf(f, "In three words I can sum up everything I've learned about life: it goes on. The only impossible journey is the one you never begin. Don't walk behind me; I may not lead. Don't walk in front of me; I may not follow. Just walk beside me and be my friend. Life is like riding a bicycle. To keep your balance, you must keep moving.\n");
+                fprintf(f, "The real test is not whether you avoid failure, because you won't. It's whether you let it harden or shame you into inaction, or whether you learn from it; whether you choose to persevere. You have brains in your head. You have feet in your shoes. You can steer yourself any direction you choose. You're on your own. And you know what you know.\n");
+                fprintf(f, "Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking. If life were predictable it would cease to be life, and be without flavor. If you look at what you have in life, you'll always have more. If you look at what you don't have in life, you'll never have enough.\n");
+                fprintf(f, "Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love.\n");
+                fprintf(f, "Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that. The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too.\n");
+                fprintf(f, "Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life.\n");
+                fprintf(f, "Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with a smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that.\n");
+                fprintf(f, "The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail.\n");
+                fprintf(f, "You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life. Life is a succession of lessons which must be lived to be understood.\n");
+                fclose(f);
+            }
+        } else fclose(f);
+    }
+
+    /* 120-second texts */
+    {
+        FILE *f = fopen("text_120.txt", "r");
+        if (!f) {
+            f = fopen("text_120.txt", "w");
+            if (f) {
+                fprintf(f, "The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that. The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin.\n");
+                fprintf(f, "Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking. If life were predictable it would cease to be life, and be without flavor. If you look at what you have in life, you'll always have more. If you look at what you don't have in life, you'll never have enough. Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with a smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only love can drive out hate.\n");
+                fprintf(f, "Hate cannot drive out hate; only love can do that. The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking.\n");
+                fprintf(f, "If life were predictable it would cease to be life, and be without flavor. If you look at what you have in life, you'll always have more. If you look at what you don't have in life, you'll never have enough. Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that.\n");
+                fprintf(f, "The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking.\n");
+                fclose(f);
+            }
+        } else fclose(f);
+    }
+
+    /* 150-second texts */
+    {
+        FILE *f = fopen("text_150.txt", "r");
+        if (!f) {
+            f = fopen("text_150.txt", "w");
+            if (f) {
+                fprintf(f, "Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking. If life were predictable it would cease to be life, and be without flavor. If you look at what you have in life, you'll always have more. If you look at what you don't have in life, you'll never have enough. Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that.\n");
+                fprintf(f, "The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking. If life were predictable it would cease to be life, and be without flavor.\n");
+                fprintf(f, "If you look at what you have in life, you'll always have more. If you look at what you don't have in life, you'll never have enough. Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that. The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart.\n");
+                fprintf(f, "It is during our darkest moments that we must focus to see the light. Whoever is happy will make others happy too. Do not go where the path may lead, go instead where there is no path and leave a trail. You will face many defeats in life, but never let yourself be defeated. The only impossible journey is the one you never begin. The purpose of our lives is to be happy. Your time is limited, so don't waste it living someone else's life. Don't be trapped by dogma which is living with the results of other people's thinking. If life were predictable it would cease to be life, and be without flavor. If you look at what you have in life, you'll always have more.\n");
+                fprintf(f, "If you look at what you don't have in life, you'll never have enough. Life is a succession of lessons which must be lived to be understood. Many of life's failures are people who did not realize how close they were to success when they gave up. The only limit to our realization of tomorrow is our doubts of today. Let us always meet each other with smile, for the smile is the beginning of love. Darkness cannot drive out darkness; only light can do that. Hate cannot drive out hate; only love can do that. The best and most beautiful things in the world cannot be seen or even touched they must be felt with the heart. It is during our darkest moments that we must focus to see the light.\n");
+                fclose(f);
+            }
+        } else fclose(f);
+    }
+}
+
+/* ── login / register ────────────────────────────────────── */
+int login() {
+    int choice;
+    scanf("%d", &choice);
+    getchar();
+
+    if (choice == 1) {
+        char username[50], password[50];
+        printf("Enter username: "); fgets(username, 50, stdin);
+        username[strcspn(username, "\n")] = 0;
+        printf("Enter password: "); fgets(password, 50, stdin);
+        password[strcspn(password, "\n")] = 0;
+
+        for (int i = 0; i < userCount; i++) {
+            if (strcmp(username, users[i].username) == 0 &&
+                strcmp(password, users[i].password) == 0) {
+                strcpy(currentUser, username);
+                return 1;
+            }
+        }
+        printf("Invalid username or password!\n");
+        myDelay(2000);
+        return 0;
+
+    } else if (choice == 2) {
+        registerUser();
+        return 1;
+    }
+
+    printf("Invalid choice!\n");
+    myDelay(2000);
+    return 0;
+}
+
+void registerUser() {
+    if (userCount >= MAX_USERS) {
+        printf("Maximum user limit reached!\n"); myDelay(2000); return;
+    }
+    char username[50], password[50];
+    printf("Enter new username: "); fgets(username, 50, stdin);
+    username[strcspn(username, "\n")] = 0;
+
+    for (int i = 0; i < userCount; i++) {
+        if (strcmp(username, users[i].username) == 0) {
+            printf("Username already exists!\n"); myDelay(2000); return;
+        }
+    }
+    printf("Enter password: "); fgets(password, 50, stdin);
+    password[strcspn(password, "\n")] = 0;
+
+    strcpy(users[userCount].username, username);
+    strcpy(users[userCount].password, password);
+    userCount++;
+    strcpy(currentUser, username);
+    printf("Registration successful!\n");
+    myDelay(2000);
+}
+
+/* ── mainMenu ────────────────────────────────────────────── */
+void mainMenu() {
+    int choice;
+    do {
+        clearScreen();
+        printf("\n");
+        printf(" .:*~*:._.:*~*:._.:*~*:._.:*~*:._.:*~*:._.:*~*:.\n");
+        printf(" |                                                 |\n");
+        printf(" |          DR.Typing  -  Main Menu               |\n");
+        printf(" |          Welcome,  %-28s |\n", currentUser);
+        printf(" |                                                 |\n");
+        printf(" .:*~*:._.:*~*:._.:*~*:._.:*~*:._.:*~*:._.:*~*:.\n\n");
+
+        printf("    ..: 1.  Start Typing Test      :..\n");
+        printf("    ..: 2.  View Scoreboard        :..\n");
+        printf("    ..: 3.  View Personal Records  :..\n");
+        printf("    ..: 4.  About this Platform    :..\n");
+        printf("    ..: 5.  Contact                :..\n");
+        printf("    ..: 6.  Exit                   :..\n");
+        printf("    ____________________________________\n\n");
+        printf("  <*> ==> Enter your choice : ");
+        scanf("%d", &choice); getchar();
+
+        switch (choice) {
+            case 1: {
+                clearScreen();
+                printf("\n");
+                printf(" .:*~*:._.:*~*:._.:*~*:._.:*~*:.\n");
+                printf(" |    Select Test Duration       |\n");
+                printf(" |_______________________________|\n");
+                printf(" |  1.  15  seconds              |\n");
+                printf(" |  2.  30  seconds              |\n");
+                printf(" |  3.  50  seconds              |\n");
+                printf(" |  4.  120 seconds              |\n");
+                printf(" |  5.  150 seconds              |\n");
+                printf(" .:*~*:._.:*~*:._.:*~*:._.:*~*:.\n");
+                printf("  Enter your choice : ");
+
+                int dc; scanf("%d", &dc); getchar();
+                int dur;
+                switch (dc) {
+                    case 1: dur =  15; break;
+                    case 2: dur =  30; break;
+                    case 3: dur =  50; break;
+                    case 4: dur = 120; break;
+                    case 5: dur = 150; break;
+                    default:
+                        printf("Invalid choice! Defaulting to 30 seconds.\n");
+                        myDelay(1500); dur = 30;
+                }
+                typingTest(dur);
+                break;
+            }
+            case 2: showScoreboard();       break;
+            case 3: showPersonalRecords();  break;
+            case 4: showAbout();            break;
+            case 5: showContact();          break;
+            case 6: printf("\n  Goodbye! Thanks for using DR.Typing!\n\n"); break;
+            default:
+                printf("Invalid choice!\n"); myDelay(1500);
+        }
+    } while (choice != 6);
+}
+
+/* ── typingTest ──────────────────────────────────────────── */
+void typingTest(int duration) {
+    clearScreen();
+
+    char filename[30];
+    sprintf(filename, "text_%d.txt", duration);
+
+    FILE *f = fopen(filename, "r");
+    if (!f) { printf("Error opening text file!\n"); myDelay(2000); return; }
+
+    /* Count lines */
+    int lineCount = 0;
+    char ch;
+    while ((ch = (char)fgetc(f)) != EOF)
+        if (ch == '\n') lineCount++;
+
+    if (lineCount == 0) {
+        printf("No text available!\n"); fclose(f); myDelay(2000); return;
+    }
+
+    /* Pick a random line */
+    rewind(f);
+    srand((unsigned)time(NULL));
+    int sel = rand() % lineCount;
+
+    char line[MAX_LINE_LENGTH];
+    for (int i = 0; i <= sel; i++) {
+        if (fgets(line, MAX_LINE_LENGTH, f) == NULL) {
+            printf("Error reading text file!\n"); fclose(f); myDelay(2000); return;
+        }
+    }
+    fclose(f);
+    line[strcspn(line, "\n")] = 0;   /* strip trailing newline */
+
+    /* ── Show the text ── */
+    printf("\n  .:~*~:.  Typing Test  .:~*~:.\n\n");
+    printf("  Type the following text exactly:\n\n");
+    displayTextInBox(line);
+    printf("\n  Press any key to start ...");
+    _getch();
+
+    clearScreen();
+    printf("\n  .:~*~:.  Typing Test  .:~*~:.\n\n");
+    printf("  Type the following text exactly:\n\n");
+    displayTextInBox(line);
+    printf("\n  Time: %d sec  |  Press ENTER when done\n\n", duration);
+    printf("  > ");
+
+    time_t startTime = time(NULL);
+    time_t endTime   = startTime + duration;
+
+    char  input[MAX_TEXT_LENGTH] = {0};
+    int   pos        = 0;
+    int   charsTyped = 0;
+
+    while (time(NULL) < endTime) {
+        long remaining = (long)(endTime - time(NULL));
+        /* Redraw timer on same line */
+        printf("\r  [%3ld sec left]  > %s   ", remaining, input);
+        fflush(stdout);
+
+        if (_kbhit()) {
+            char c = (char)_getch();
+            if (c == '\r') break;
+            else if (c == '\b') {
+                if (pos > 0) { pos--; input[pos] = '\0'; }
+            } else if (isprint((unsigned char)c) && pos < MAX_TEXT_LENGTH - 1) {
+                input[pos++] = c;
+                input[pos]   = '\0';
+                charsTyped++;
+            }
+        }
+        Sleep(40);
+    }
+    printf("\n");
+
+    /* ── Score calculation ── */
+    int totalChars  = (int)strlen(line);
+    int inputLen    = (int)strlen(input);
+    int correctChars = 0;
+
+    for (int i = 0; i < inputLen && i < totalChars; i++)
+        if (input[i] == line[i]) correctChars++;
+
+    int mistakes = inputLen - correctChars;
+    if (mistakes < 0) mistakes = 0;
+
+    float timeMin = (float)duration / 60.0f;
+    int   raw     = (timeMin > 0) ? (int)((charsTyped / 5.0f) / timeMin) : 0;
+    float consist = (charsTyped > 0) ? ((float)correctChars / charsTyped) * 100.0f : 0.0f;
+
+    showResults(correctChars, totalChars, mistakes, duration, raw, charsTyped, consist);
+}
+
+/* ── showResults ─────────────────────────────────────────── */
+void showResults(int correctChars, int totalChars, int mistakes,
+                 int duration, int raw, int charsTyped, float consistency) {
+    clearScreen();
+
+    float accuracy = (totalChars > 0) ? ((float)correctChars / totalChars) * 100.0f : 0.0f;
+    int   wpm      = (duration  > 0)  ? (int)((correctChars / 5.0f) / (duration / 60.0f)) : 0;
+
+    printHeading(".:*  Typing Test Results  *:.");
+
+    /* Results box */
+    printf("  +------------------------------------------------+\n");
+    printf("  |  %-20s   %20s  |\n", "Metric", "Value");
+    printf("  +------------------------------------------------+\n");
+    printf("  |  Correct characters  :  %-20d |\n", correctChars);
+    printf("  |  Total characters    :  %-20d |\n", totalChars);
+    printf("  |  Mistakes            :  %-20d |\n", mistakes);
+    printf("  |  Accuracy            :  %-18.2f %% |\n", accuracy);
+    printf("  |  Words Per Minute    :  %-20d |\n", wpm);
+    printf("  |  Raw WPM             :  %-20d |\n", raw);
+    printf("  |  Characters Typed    :  %-20d |\n", charsTyped);
+    printf("  |  Consistency         :  %-18.2f %% |\n", consistency);
+    printf("  |  Test Duration       :  %-17d sec |\n", duration);
+    printf("  +------------------------------------------------+\n\n");
+
+    /* Rating */
+    const char *rating =
+        wpm >= 80 ? ".:* Legendary Typist *:." :
+        wpm >= 60 ? ".:* Expert Typist *:."     :
+        wpm >= 40 ? ".:* Good Typist *:."        :
+        wpm >= 20 ? ".:* Average Typist *:."     :
+                    ".:* Keep Practising! *:.";
+    printf("  Performance: %s\n\n", rating);
+
+    /* Save record */
+    if (recordCount < MAX_RECORDS) {
+        strcpy(records[recordCount].username,  currentUser);
+        records[recordCount].wpm         = wpm;
+        records[recordCount].accuracy    = (int)accuracy;
+        records[recordCount].mistakes    = mistakes;
+        records[recordCount].raw         = raw;
+        records[recordCount].charsTyped  = charsTyped;
+        records[recordCount].consistency = consistency;
+        records[recordCount].date        = time(NULL);
+        recordCount++;
+        saveRecords();   /* persist immediately */
+    }
+
+    printf("  Press any key to continue ...");
+    _getch();
+}
+
+/* ── showScoreboard ──────────────────────────────────────── */
+void showScoreboard() {
+    clearScreen();
+
+    /* Bubble-sort descending by WPM */
+    for (int i = 0; i < recordCount - 1; i++)
+        for (int j = 0; j < recordCount - i - 1; j++)
+            if (records[j].wpm < records[j+1].wpm) {
+                ScoreRecord tmp = records[j];
+                records[j] = records[j+1];
+                records[j+1] = tmp;
+            }
+
+    int show = (recordCount > 10) ? 10 : recordCount;
+
+    /* ── Header ── */
+    printf("\n");
+    printf("  .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:.\n");
+    printf("  |                                                  |\n");
+    printf("  |       ~~ SCOREBOARD  .::.  Top Performers ~~    |\n");
+    printf("  |                                                  |\n");
+    printf("  .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:.\n\n");
+
+    /* Column widths: Rank(4) User(16) WPM(5) Raw(5) Acc(8) Err(5) Chars(5) Cons(8) Date(10) */
+    printf("  +------+------------------+-------+-------+----------+-------+-------+----------+------------+\n");
+    printf("  | Rank | Username         |  WPM  |  Raw  | Accuracy | Err   | Chars | Consist  | Date       |\n");
+    printf("  +------+------------------+-------+-------+----------+-------+-------+----------+------------+\n");
+
+    if (show == 0) {
+        printf("  |  No records yet. Complete a typing test to appear here!                                  |\n");
+    } else {
+        for (int i = 0; i < show; i++) {
+            char dateStr[20];
+            strftime(dateStr, sizeof(dateStr), "%Y-%m-%d",
+                     localtime(&records[i].date));
+
+            /* Medal symbols for top 3 */
+            const char *medal =
+                i == 0 ? ".:1" :
+                i == 1 ? ".:2" :
+                i == 2 ? ".:3" : "   ";
+
+            printf("  | %s%-2d | %-16s | %5d | %5d | %7d%% | %5d | %5d | %7.1f%% | %-10s |\n",
+                   medal, i + 1,
+                   records[i].username,
+                   records[i].wpm,
+                   records[i].raw,
+                   records[i].accuracy,
+                   records[i].mistakes,
+                   records[i].charsTyped,
+                   records[i].consistency,
+                   dateStr);
+        }
+    }
+
+    printf("  +------+------------------+-------+-------+----------+-------+-------+----------+------------+\n\n");
+    printf("  .:*~*:. Press any key to return to menu .:*~*:.\n");
+    _getch();
+}
+
+/* ── showPersonalRecords ─────────────────────────────────── */
+void showPersonalRecords() {
+    clearScreen();
+
+    /* ── Header ── */
+    printf("\n");
+    printf("  .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:.\n");
+    printf("  |                                                  |\n");
+
+    char heading[80];
+    sprintf(heading, "  Personal Records  -  %s", currentUser);
+    printf("  |   ~~ %-43s~~ |\n", heading);
+
+    printf("  |                                                  |\n");
+    printf("  .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:. .:*~*:.\n\n");
+
+    printf("  +-----+---------------------+-------+-------+----------+-------+-------+----------+\n");
+    printf("  | No. | Date & Time         |  WPM  |  Raw  | Accuracy | Err   | Chars | Consist  |\n");
+    printf("  +-----+---------------------+-------+-------+----------+-------+-------+----------+\n");
+
+    int count = 0;
+    for (int i = 0; i < recordCount; i++) {
+        if (strcmp(records[i].username, currentUser) == 0) {
+            count++;
+            char dateStr[25];
+            strftime(dateStr, sizeof(dateStr), "%Y-%m-%d  %H:%M:%S",
+                     localtime(&records[i].date));
+
+            printf("  | %3d | %-19s | %5d | %5d | %7d%% | %5d | %5d | %7.1f%% |\n",
+                   count,
+                   dateStr,
+                   records[i].wpm,
+                   records[i].raw,
+                   records[i].accuracy,
+                   records[i].mistakes,
+                   records[i].charsTyped,
+                   records[i].consistency);
+        }
+    }
+
+    if (count == 0)
+        printf("  |  No records yet. Complete a typing test first!                                |\n");
+
+    printf("  +-----+---------------------+-------+-------+----------+-------+-------+----------+\n\n");
+    printf("  .:*~*:. Press any key to return to menu .:*~*:.\n");
+    _getch();
+}
+
+/* ── showAbout ───────────────────────────────────────────── */
+void showAbout() {
+    clearScreen();
+    printHeading(".:*  About DR.Typing  *:.");
+
+    printf("  DR.Typing is a passion project by Debadatta Rout, built as part of\n");
+    printf("  his journey learning C programming. The platform combines practical\n");
+    printf("  programming skills with a fun application friends can use offline.\n\n");
+
+    printf("  Key Features:\n");
+    printf("  ..: Offline typing speed challenges\n");
+    printf("  ..: Track personal progress over time\n");
+    printf("  ..: Compete with friends on the same machine\n");
+    printf("  ..: Multiple test durations for variety\n");
+    printf("  ..: Detailed performance analytics\n\n");
+
+    printf("  This project represents the culmination of learning fundamental C\n");
+    printf("  concepts: file I/O, data structures, user input handling,\n");
+    printf("  and terminal interface design.\n\n");
+
+    printf("  Press any key to return to the main menu...");
+    _getch();
+}
+
+/* ── showContact ─────────────────────────────────────────── */
+void showContact() {
+    clearScreen();
+    printHeading(".:*  Contact Information  *:.");
+
+    printf("  Name     :  Debadatta Rout\n");
+    printf("  Phone    :  +91 9827068499\n");
+    printf("  Email    :  routdebadatta22@gmail.com\n");
+    printf("  LinkedIn :  http://www.linkedin.com/in/debadatta-rout-454935341\n\n");
+
+    printf("  For questions, suggestions, or feedback about DR.Typing,\n");
+    printf("  feel free to reach out through any of the above channels.\n\n");
+
+    printf("  Press any key to return to the main menu...");
+    _getch();
+}
+
+/* ── Utilities ───────────────────────────────────────────── */
+void clearScreen()        { system("cls"); }
+void myDelay(int ms)      { Sleep(ms); }
+
+/* ── main ────────────────────────────────────────────────── */
+int main(void) {
+    loadUsers();
+    loadRecords();
+    createTextFiles();
+
+    displayWelcome();
+
+    if (!login()) {
+        printf(">> Login failed. Exiting ...\n");
+        myDelay(2000);
+        return 1;
+    }
+
+    mainMenu();
+
+    saveUsers();
+    saveRecords();
+    return 0;
+}
